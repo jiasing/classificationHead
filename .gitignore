@@ -219,3 +219,10 @@ models/
 
 # MacOS
 .DS_Store
+data/classification_processed/juliet_functions.csv
+data/classification_processed/juliet_functions.json
+data/classification_processed/juliet_cleaned.csv
+data/classification_processed/juliet_cleaned.json
+data/classification_processed/juliet_labelled.csv
+data/classification_processed/juliet_labelled.json
+data/classification_processed/label_maps.json
