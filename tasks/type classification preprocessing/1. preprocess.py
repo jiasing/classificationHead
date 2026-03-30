@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 JULIET_ROOT = "/Users/jiasing/Juliet"
 OUTPUT_DIR  = "data/classification_processed"
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "juliet_functions.csv")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, "1.preprocess - juliet_functions.csv")
 
 
 # ── STEP 2: Extract CWE number from a folder or filename ──────────────────────

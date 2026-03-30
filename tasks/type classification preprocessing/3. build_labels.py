@@ -207,7 +207,7 @@ def apply_labels(df):
 
 if __name__ == "__main__":
     # Load the cleaned data into df
-    df = pd.read_json("data/classification_processed/juliet_cleaned.json", lines=True)
+    df = pd.read_json("data/classification_processed/2.juliet_cleaned.json", lines=True)
     print(f"Loaded {len(df)} functions")
 
     # Add category_id and error_type_id columns. 0 (clean), 1(dirty).
@@ -216,5 +216,5 @@ if __name__ == "__main__":
     print(f"\nCategory distribution:\n{df['category_id'].value_counts()}")
     print(f"\nError type distribution:\n{df['error_type_id'].value_counts()}")
 
-    df.to_json("data/classification_processed/juliet_labelled.json", orient='records', lines=True)
-    print("\nSaved to data/classification_processed/juliet_labelled.json")
+    df.to_json("data/classification_processed/3.juliet_labelled.json", orient='records', lines=True)
+    print("\nSaved to data/3.classification_processed/juliet_labelled.json")
