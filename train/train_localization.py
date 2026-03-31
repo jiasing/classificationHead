@@ -36,11 +36,13 @@ class TrainConfig:
     pos_weight: float = 3.0
     max_length: int = 1024
     batch_size: int = 2
+    gradient_accumulation_steps: int = 1
     learning_rate: float = 1e-4
     num_epochs: int = 1
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     log_dir: str = "logs/localization"
     model_dir: str = "models/localization"
+    resume_from: str | None = None
 
 
 def parse_args() -> TrainConfig:
@@ -54,11 +56,13 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--pos-weight", type=float, default=3.0)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--log-dir", default="logs/localization")
     parser.add_argument("--model-dir", default="models/localization")
+    parser.add_argument("--resume-from", default=None)
     args = parser.parse_args()
 
     return TrainConfig(
@@ -71,11 +75,13 @@ def parse_args() -> TrainConfig:
         pos_weight=args.pos_weight,
         max_length=args.max_length,
         batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         num_epochs=args.num_epochs,
         device=args.device,
         log_dir=args.log_dir,
         model_dir=args.model_dir,
+        resume_from=args.resume_from,
     )
 
 
@@ -256,6 +262,7 @@ def evaluate_localization_model(
 
 def save_checkpoint(
     model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer | None,
     tokenizer: object,
     config: TrainConfig,
     filename: str,
@@ -268,6 +275,7 @@ def save_checkpoint(
     state = {
         "backbone_name": config.backbone_name,
         "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
         "max_length": config.max_length,
         "line_token": "<LINE>",
         "pos_weight": config.pos_weight,
@@ -289,10 +297,33 @@ def train_localization_model(config: TrainConfig) -> None:
     global_step = 0
     best_val_accuracy = float("-inf")
     best_val_f1 = float("-inf")
+    start_epoch = 0
+
+    if config.gradient_accumulation_steps < 1:
+        raise ValueError("gradient_accumulation_steps must be >= 1")
+
+    if config.resume_from is not None:
+        checkpoint_path = Path(config.resume_from)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"resume checkpoint not found: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer_state = checkpoint.get("optimizer_state_dict")
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+        start_epoch = int(checkpoint.get("epoch", 0))
+        global_step = int(checkpoint.get("global_step", 0))
+        best_val_accuracy = float(checkpoint.get("best_val_accuracy", float("-inf")))
+        best_val_f1 = float(checkpoint.get("best_val_f1", float("-inf")))
+        print(
+            f"resumed_from={checkpoint_path} "
+            f"start_epoch={start_epoch + 1} "
+            f"global_step={global_step}"
+        )
 
     model.train()
     try:
-        for epoch in range(config.num_epochs):
+        for epoch in range(start_epoch, config.num_epochs):
             epoch_loss = 0.0
 
             train_progress = tqdm(
@@ -300,8 +331,9 @@ def train_localization_model(config: TrainConfig) -> None:
                 desc=f"train epoch {epoch + 1}/{config.num_epochs}",
                 leave=True,
             )
-            for batch in train_progress:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
+            steps_in_epoch = 0
+            for batch_idx, batch in enumerate(train_progress):
                 outputs = model(
                     input_ids=batch["input_ids"].to(config.device),
                     attention_mask=batch["attention_mask"].to(config.device),
@@ -310,16 +342,23 @@ def train_localization_model(config: TrainConfig) -> None:
                     line_mask=batch["line_mask"].to(config.device),
                 )
                 loss = outputs["loss"]
-                loss.backward()
-                optimizer.step()
-
                 loss_value = loss.item()
+                scaled_loss = loss / config.gradient_accumulation_steps
+                scaled_loss.backward()
+
+                should_step = (batch_idx + 1) % config.gradient_accumulation_steps == 0
+                is_last_batch = batch_idx + 1 == len(train_dataloader)
+                if should_step or is_last_batch:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    global_step += 1
+                    writer.add_scalar("train/loss_step", loss_value, global_step)
+
                 epoch_loss += loss_value
-                writer.add_scalar("train/loss_step", loss_value, global_step)
-                global_step += 1
+                steps_in_epoch += 1
                 train_progress.set_postfix(loss=f"{loss_value:.4f}")
 
-            train_loss = epoch_loss / max(len(train_dataloader), 1)
+            train_loss = epoch_loss / max(steps_in_epoch, 1)
             writer.add_scalar("train/loss_epoch", train_loss, epoch)
 
             val_metrics = evaluate_localization_model(model, val_dataloader, config.device)
@@ -338,14 +377,18 @@ def train_localization_model(config: TrainConfig) -> None:
                 best_val_accuracy = val_metrics["accuracy"]
                 save_checkpoint(
                     model,
+                    optimizer,
                     tokenizer,
                     config,
                     filename="best_accuracy.pt",
                     extra_state={
                         "epoch": epoch + 1,
+                        "global_step": global_step,
                         "val_accuracy": val_metrics["accuracy"],
                         "val_f1": val_metrics["f1"],
                         "val_loss": val_metrics["loss"],
+                        "best_val_accuracy": best_val_accuracy,
+                        "best_val_f1": best_val_f1,
                     },
                 )
 
@@ -353,22 +396,29 @@ def train_localization_model(config: TrainConfig) -> None:
                 best_val_f1 = val_metrics["f1"]
                 save_checkpoint(
                     model,
+                    optimizer,
                     tokenizer,
                     config,
                     filename="best_f1.pt",
                     extra_state={
                         "epoch": epoch + 1,
+                        "global_step": global_step,
                         "val_accuracy": val_metrics["accuracy"],
                         "val_f1": val_metrics["f1"],
                         "val_loss": val_metrics["loss"],
+                        "best_val_accuracy": best_val_accuracy,
+                        "best_val_f1": best_val_f1,
                     },
                 )
 
         save_localization_artifacts(
             model,
+            optimizer,
             tokenizer,
             config,
             extra_state={
+                "epoch": config.num_epochs,
+                "global_step": global_step,
                 "best_val_accuracy": best_val_accuracy if val_dataloader is not None else 0.0,
                 "best_val_f1": best_val_f1 if val_dataloader is not None else 0.0,
             },
@@ -379,12 +429,14 @@ def train_localization_model(config: TrainConfig) -> None:
 
 def save_localization_artifacts(
     model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer | None,
     tokenizer: object,
     config: TrainConfig,
     extra_state: dict[str, float | int | str] | None = None,
 ) -> None:
     save_checkpoint(
         model,
+        optimizer,
         tokenizer,
         config,
         filename="checkpoint.pt",
@@ -401,6 +453,9 @@ def main() -> None:
     print(f"max_length={config.max_length}")
     print(f"negative_to_positive_ratio=1:{config.negative_to_positive_ratio}")
     print(f"pos_weight={config.pos_weight}")
+    print(f"gradient_accumulation_steps={config.gradient_accumulation_steps}")
+    if config.resume_from is not None:
+        print(f"resume_from={config.resume_from}")
     train_localization_model(config)
 
 
