@@ -54,87 +54,123 @@ def parse_threshold_sweep(raw: str | None, default_threshold: float) -> list[flo
     return thresholds
 
 
+def format_markdown_table(rows: list[dict[str, float]]) -> str:
+    header = "| threshold | loss | accuracy | precision | recall | f1 |"
+    divider = "|---:|---:|---:|---:|---:|---:|"
+    body = [
+        (
+            f"| {row['threshold']:.4f} | {row['loss']:.6f} | {row['accuracy']:.6f} | "
+            f"{row['precision']:.6f} | {row['recall']:.6f} | {row['f1']:.6f} |"
+        )
+        for row in rows
+    ]
+    return "\n".join([header, divider, *body])
+
+
+def resolve_checkpoint_paths(path: Path) -> list[Path]:
+    if path.is_dir():
+        checkpoints = sorted(path.glob("*.pt"))
+        if not checkpoints:
+            raise FileNotFoundError(f"no .pt checkpoints found in directory: {path}")
+        return checkpoints
+    if not path.exists():
+        raise FileNotFoundError(f"checkpoint not found: {path}")
+    return [path]
+
+
 def main() -> None:
     args = parse_args()
     checkpoint_path = Path(args.checkpoint_path)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    backbone_name = args.backbone_name or checkpoint["backbone_name"]
-    max_length = args.max_length or checkpoint.get("max_length", 1024)
-    pos_weight = float(checkpoint.get("pos_weight", 1.0))
+    checkpoint_paths = resolve_checkpoint_paths(checkpoint_path)
 
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:
         raise ImportError("transformers is required to evaluate the localization model.") from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(backbone_name)
-    add_localization_special_tokens(tokenizer)
+    thresholds = parse_threshold_sweep(args.threshold_sweep, args.threshold)
+    samples_cache = None
 
-    samples = load_localization_jsonl(
-        path=args.dataset_path,
-        max_samples=args.max_samples,
-        show_progress=True,
-    )
-    features = prepare_localization_features(
-        samples=samples,
-        tokenizer=tokenizer,
-        max_length=max_length,
-        show_progress=True,
-    )
-    if not features:
-        raise RuntimeError(
-            f"No localization features were produced from {args.dataset_path}. "
-            "Increase max_length or inspect the dataset formatting."
+    for current_checkpoint_path in checkpoint_paths:
+        checkpoint = torch.load(current_checkpoint_path, map_location="cpu")
+        backbone_name = args.backbone_name or checkpoint["backbone_name"]
+        max_length = args.max_length or checkpoint.get("max_length", 1024)
+        pos_weight = float(checkpoint.get("pos_weight", 1.0))
+
+        tokenizer = AutoTokenizer.from_pretrained(backbone_name)
+        add_localization_special_tokens(tokenizer)
+
+        if samples_cache is None:
+            samples_cache = load_localization_jsonl(
+                path=args.dataset_path,
+                max_samples=args.max_samples,
+                show_progress=True,
+            )
+        samples = samples_cache
+        features = prepare_localization_features(
+            samples=samples,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            show_progress=True,
+        )
+        if not features:
+            raise RuntimeError(
+                f"No localization features were produced from {args.dataset_path}. "
+                "Increase max_length or inspect the dataset formatting."
+            )
+
+        dataset = LocalizationDataset(features)
+        collator = LocalizationCollator(
+            pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=collator,
         )
 
-    dataset = LocalizationDataset(features)
-    collator = LocalizationCollator(
-        pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collator,
-    )
+        model = build_localization_model(
+            backbone_name=backbone_name,
+            tokenizer=tokenizer,
+            pos_weight=pos_weight,
+        ).to(args.device)
+        model.load_state_dict(checkpoint["model_state_dict"])
 
-    model = build_localization_model(
-        backbone_name=backbone_name,
-        tokenizer=tokenizer,
-        pos_weight=pos_weight,
-    ).to(args.device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"checkpoint_path={current_checkpoint_path}")
+        print(f"dataset_path={args.dataset_path}")
+        print(f"num_samples={len(samples)}")
+        print(f"num_features={len(features)}")
+        print(f"backbone_name={backbone_name}")
+        print(f"max_length={max_length}")
+        print(f"batch_size={args.batch_size}")
 
-    thresholds = parse_threshold_sweep(args.threshold_sweep, args.threshold)
+        best_threshold = None
+        best_f1 = float("-inf")
+        rows: list[dict[str, float]] = []
+        for threshold in thresholds:
+            metrics = evaluate_localization_model(model, dataloader, args.device, threshold=threshold)
+            row = {
+                "threshold": threshold,
+                "loss": metrics["loss"],
+                "accuracy": metrics["accuracy"],
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "f1": metrics["f1"],
+            }
+            rows.append(row)
+            if metrics["f1"] > best_f1:
+                best_f1 = metrics["f1"]
+                best_threshold = threshold
 
-    print(f"checkpoint_path={checkpoint_path}")
-    print(f"dataset_path={args.dataset_path}")
-    print(f"num_samples={len(samples)}")
-    print(f"num_features={len(features)}")
-    print(f"backbone_name={backbone_name}")
-    print(f"max_length={max_length}")
-    print(f"batch_size={args.batch_size}")
+        print()
+        print(format_markdown_table(rows))
 
-    best_threshold = None
-    best_f1 = float("-inf")
-    for threshold in thresholds:
-        metrics = evaluate_localization_model(model, dataloader, args.device, threshold=threshold)
-        print(f"threshold={threshold:.4f}")
-        print(f"loss={metrics['loss']:.6f}")
-        print(f"accuracy={metrics['accuracy']:.6f}")
-        print(f"precision={metrics['precision']:.6f}")
-        print(f"recall={metrics['recall']:.6f}")
-        print(f"f1={metrics['f1']:.6f}")
-        if metrics["f1"] > best_f1:
-            best_f1 = metrics["f1"]
-            best_threshold = threshold
-
-    if len(thresholds) > 1:
-        print(f"best_threshold={best_threshold:.4f}")
-        print(f"best_f1={best_f1:.6f}")
+        if len(thresholds) > 1:
+            print()
+            print(f"best_threshold={best_threshold:.4f}")
+            print(f"best_f1={best_f1:.6f}")
+        print()
 
 
 if __name__ == "__main__":
