@@ -37,6 +37,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated thresholds, e.g. 0.05,0.1,0.2,0.3,0.4,0.5",
     )
+    parser.add_argument(
+        "--save-markdown",
+        action="store_true",
+        help="Save each checkpoint's evaluation result to a markdown file named after the checkpoint.",
+    )
+    parser.add_argument(
+        "--markdown-dir",
+        default=None,
+        help="Directory to save markdown reports. Defaults to the checkpoint directory.",
+    )
     return parser.parse_args()
 
 
@@ -76,6 +86,50 @@ def resolve_checkpoint_paths(path: Path) -> list[Path]:
     if not path.exists():
         raise FileNotFoundError(f"checkpoint not found: {path}")
     return [path]
+
+
+def build_markdown_report(
+    checkpoint_path: Path,
+    dataset_path: str,
+    num_samples: int,
+    num_features: int,
+    backbone_name: str,
+    max_length: int,
+    batch_size: int,
+    rows: list[dict[str, float]],
+    best_threshold: float | None,
+    best_f1: float,
+) -> str:
+    lines = [
+        f"# Evaluation Report: `{checkpoint_path.name}`",
+        "",
+        f"- checkpoint_path: `{checkpoint_path}`",
+        f"- dataset_path: `{dataset_path}`",
+        f"- num_samples: `{num_samples}`",
+        f"- num_features: `{num_features}`",
+        f"- backbone_name: `{backbone_name}`",
+        f"- max_length: `{max_length}`",
+        f"- batch_size: `{batch_size}`",
+        "",
+        format_markdown_table(rows),
+    ]
+    if best_threshold is not None:
+        lines.extend(
+            [
+                "",
+                f"- best_threshold: `{best_threshold:.4f}`",
+                f"- best_f1: `{best_f1:.6f}`",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def save_markdown_report(report: str, checkpoint_path: Path, markdown_dir: str | None) -> Path:
+    target_dir = Path(markdown_dir) if markdown_dir is not None else checkpoint_path.parent
+    target_dir.mkdir(parents=True, exist_ok=True)
+    report_path = target_dir / f"{checkpoint_path.stem}.md"
+    report_path.write_text(report)
+    return report_path
 
 
 def main() -> None:
@@ -170,6 +224,26 @@ def main() -> None:
             print()
             print(f"best_threshold={best_threshold:.4f}")
             print(f"best_f1={best_f1:.6f}")
+
+        if args.save_markdown:
+            report = build_markdown_report(
+                checkpoint_path=current_checkpoint_path,
+                dataset_path=args.dataset_path,
+                num_samples=len(samples),
+                num_features=len(features),
+                backbone_name=backbone_name,
+                max_length=max_length,
+                batch_size=args.batch_size,
+                rows=rows,
+                best_threshold=best_threshold if len(thresholds) > 1 else None,
+                best_f1=best_f1,
+            )
+            report_path = save_markdown_report(
+                report=report,
+                checkpoint_path=current_checkpoint_path,
+                markdown_dir=args.markdown_dir,
+            )
+            print(f"markdown_report={report_path}")
         print()
 
 
