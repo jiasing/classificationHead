@@ -131,11 +131,18 @@ def add_localization_special_tokens(tokenizer: Any) -> int:
 
 
 class CodeT5LineLocalizationModel(nn.Module):
-    def __init__(self, encoder: nn.Module, hidden_size: int, dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        encoder: nn.Module,
+        hidden_size: int,
+        dropout: float = 0.1,
+        pos_weight: float = 1.0,
+    ) -> None:
         super().__init__()
         self.encoder = encoder
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_size, 1)
+        self.pos_weight = pos_weight
 
     def forward(
         self,
@@ -156,7 +163,8 @@ class CodeT5LineLocalizationModel(nn.Module):
         result: dict[str, Tensor] = {"line_logits": logits}
 
         if line_labels is not None and line_mask is not None:
-            loss_fn = nn.BCEWithLogitsLoss(reduction="none")
+            pos_weight = torch.tensor(self.pos_weight, device=logits.device, dtype=logits.dtype)
+            loss_fn = nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
             losses = loss_fn(logits, line_labels)
             masked_loss = (losses * line_mask).sum() / line_mask.sum().clamp_min(1.0)
             result["loss"] = masked_loss
@@ -164,7 +172,11 @@ class CodeT5LineLocalizationModel(nn.Module):
         return result
 
 
-def build_localization_model(backbone_name: str, tokenizer: Any) -> CodeT5LineLocalizationModel:
+def build_localization_model(
+    backbone_name: str,
+    tokenizer: Any,
+    pos_weight: float = 1.0,
+) -> CodeT5LineLocalizationModel:
     try:
         from transformers import T5EncoderModel
     except ImportError as exc:
@@ -175,7 +187,11 @@ def build_localization_model(backbone_name: str, tokenizer: Any) -> CodeT5LineLo
     encoder = T5EncoderModel.from_pretrained(backbone_name)
     encoder.resize_token_embeddings(len(tokenizer))
     hidden_size = encoder.config.hidden_size
-    return CodeT5LineLocalizationModel(encoder=encoder, hidden_size=hidden_size)
+    return CodeT5LineLocalizationModel(
+        encoder=encoder,
+        hidden_size=hidden_size,
+        pos_weight=pos_weight,
+    )
 
 
 def debug_print_tokenization(backbone_name: str = "Salesforce/codet5-base", sample_index: int = 0) -> None:

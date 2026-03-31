@@ -199,7 +199,10 @@ cython_debug/
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
 #   and can be added to the global gitignore or merged into this file. However, if you prefer, 
 #   you could uncomment the following to ignore the entire vscode folder
-# .vscode/
+.vscode/
+
+# Data Files.
+data/
 
 # Ruff stuff:
 .ruff_cache/
@@ -216,3 +219,18 @@ __marimo__/
 .streamlit/secrets.toml
 
 models/
+
+# MacOS
+.DS_Store
+data/classification_processed/juliet_functions.csv
+data/classification_processed/juliet_functions.json
+data/classification_processed/juliet_cleaned.csv
+data/classification_processed/juliet_cleaned.json
+data/classification_processed/juliet_labelled.csv
+data/classification_processed/juliet_labelled.json
+data/classification_processed/label_maps.json
+
+
+logs/
+
+*.jsonl
