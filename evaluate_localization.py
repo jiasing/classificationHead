@@ -99,6 +99,8 @@ def main() -> None:
     print(f"batch_size={args.batch_size}")
     print(f"loss={metrics['loss']:.6f}")
     print(f"accuracy={metrics['accuracy']:.6f}")
+    print(f"precision={metrics['precision']:.6f}")
+    print(f"recall={metrics['recall']:.6f}")
     print(f"f1={metrics['f1']:.6f}")
 
 

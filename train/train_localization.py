@@ -37,6 +37,7 @@ class TrainConfig:
     max_length: int = 1024
     batch_size: int = 2
     gradient_accumulation_steps: int = 1
+    early_stopping_patience: int | None = None
     learning_rate: float = 1e-4
     num_epochs: int = 1
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -57,6 +58,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
+    parser.add_argument("--early-stopping-patience", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -76,6 +78,7 @@ def parse_args() -> TrainConfig:
         max_length=args.max_length,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        early_stopping_patience=args.early_stopping_patience,
         learning_rate=args.learning_rate,
         num_epochs=args.num_epochs,
         device=args.device,
@@ -215,7 +218,7 @@ def evaluate_localization_model(
     device: str,
 ) -> dict[str, float]:
     if dataloader is None:
-        return {"loss": 0.0, "accuracy": 0.0, "f1": 0.0}
+        return {"loss": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
 
     model.eval()
     total_loss = 0.0
@@ -253,9 +256,9 @@ def evaluate_localization_model(
         precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) else 0.0
         recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) else 0.0
         f1 = 0.0 if (precision + recall) == 0.0 else 2 * precision * recall / (precision + recall)
-        metrics.update({"accuracy": accuracy, "f1": f1})
+        metrics.update({"accuracy": accuracy, "precision": precision, "recall": recall, "f1": f1})
     else:
-        metrics.update({"accuracy": 0.0, "f1": 0.0})
+        metrics.update({"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0})
     model.train()
     return metrics
 
@@ -298,6 +301,8 @@ def train_localization_model(config: TrainConfig) -> None:
     best_val_accuracy = float("-inf")
     best_val_f1 = float("-inf")
     start_epoch = 0
+    epochs_without_improvement = 0
+    completed_epoch = start_epoch
 
     if config.gradient_accumulation_steps < 1:
         raise ValueError("gradient_accumulation_steps must be >= 1")
@@ -315,6 +320,7 @@ def train_localization_model(config: TrainConfig) -> None:
         global_step = int(checkpoint.get("global_step", 0))
         best_val_accuracy = float(checkpoint.get("best_val_accuracy", float("-inf")))
         best_val_f1 = float(checkpoint.get("best_val_f1", float("-inf")))
+        epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         print(
             f"resumed_from={checkpoint_path} "
             f"start_epoch={start_epoch + 1} "
@@ -324,6 +330,7 @@ def train_localization_model(config: TrainConfig) -> None:
     model.train()
     try:
         for epoch in range(start_epoch, config.num_epochs):
+            completed_epoch = epoch + 1
             epoch_loss = 0.0
 
             train_progress = tqdm(
@@ -364,12 +371,16 @@ def train_localization_model(config: TrainConfig) -> None:
             val_metrics = evaluate_localization_model(model, val_dataloader, config.device)
             writer.add_scalar("val/loss_epoch", val_metrics["loss"], epoch)
             writer.add_scalar("val/accuracy_epoch", val_metrics["accuracy"], epoch)
+            writer.add_scalar("val/precision_epoch", val_metrics["precision"], epoch)
+            writer.add_scalar("val/recall_epoch", val_metrics["recall"], epoch)
             writer.add_scalar("val/f1_epoch", val_metrics["f1"], epoch)
             print(
                 f"epoch={epoch + 1} "
                 f"train_loss={train_loss:.4f} "
                 f"val_loss={val_metrics['loss']:.4f} "
                 f"val_accuracy={val_metrics['accuracy']:.4f} "
+                f"val_precision={val_metrics['precision']:.4f} "
+                f"val_recall={val_metrics['recall']:.4f} "
                 f"val_f1={val_metrics['f1']:.4f}"
             )
 
@@ -385,15 +396,21 @@ def train_localization_model(config: TrainConfig) -> None:
                         "epoch": epoch + 1,
                         "global_step": global_step,
                         "val_accuracy": val_metrics["accuracy"],
+                        "val_precision": val_metrics["precision"],
+                        "val_recall": val_metrics["recall"],
                         "val_f1": val_metrics["f1"],
                         "val_loss": val_metrics["loss"],
                         "best_val_accuracy": best_val_accuracy,
                         "best_val_f1": best_val_f1,
+                        "epochs_without_improvement": epochs_without_improvement,
                     },
                 )
 
+            improved_f1 = False
             if val_dataloader is not None and val_metrics["f1"] > best_val_f1:
                 best_val_f1 = val_metrics["f1"]
+                improved_f1 = True
+                epochs_without_improvement = 0
                 save_checkpoint(
                     model,
                     optimizer,
@@ -404,12 +421,27 @@ def train_localization_model(config: TrainConfig) -> None:
                         "epoch": epoch + 1,
                         "global_step": global_step,
                         "val_accuracy": val_metrics["accuracy"],
+                        "val_precision": val_metrics["precision"],
+                        "val_recall": val_metrics["recall"],
                         "val_f1": val_metrics["f1"],
                         "val_loss": val_metrics["loss"],
                         "best_val_accuracy": best_val_accuracy,
                         "best_val_f1": best_val_f1,
+                        "epochs_without_improvement": epochs_without_improvement,
                     },
                 )
+            elif val_dataloader is not None:
+                epochs_without_improvement += 1
+
+            if config.early_stopping_patience is not None and val_dataloader is not None:
+                if not improved_f1:
+                    print(
+                        f"early_stopping_counter={epochs_without_improvement}/"
+                        f"{config.early_stopping_patience}"
+                    )
+                if epochs_without_improvement >= config.early_stopping_patience:
+                    print(f"early stopping triggered at epoch {epoch + 1}")
+                    break
 
         save_localization_artifacts(
             model,
@@ -417,10 +449,11 @@ def train_localization_model(config: TrainConfig) -> None:
             tokenizer,
             config,
             extra_state={
-                "epoch": config.num_epochs,
+                "epoch": completed_epoch,
                 "global_step": global_step,
                 "best_val_accuracy": best_val_accuracy if val_dataloader is not None else 0.0,
                 "best_val_f1": best_val_f1 if val_dataloader is not None else 0.0,
+                "epochs_without_improvement": epochs_without_improvement,
             },
         )
     finally:
