@@ -150,11 +150,13 @@ def build_dataloaders(config: TrainConfig) -> tuple[DataLoader, DataLoader | Non
     samples = load_localization_jsonl(
         path=config.dataset_path,
         max_samples=config.max_samples,
+        show_progress=True,
     )
     features = prepare_localization_features(
         samples=samples,
         tokenizer=tokenizer,
         max_length=config.max_length,
+        show_progress=True,
     )
     if not features:
         raise RuntimeError(

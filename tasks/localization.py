@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 from torch import Tensor, nn
+from tqdm.auto import tqdm
 
 from data.schema import LocalizationSample
 
@@ -81,6 +82,7 @@ def prepare_localization_features(
     tokenizer: Any,
     max_length: int = 512,
     line_token: str = LINE_TOKEN,
+    show_progress: bool = True,
 ) -> list[LocalizationFeatures]:
     features: list[LocalizationFeatures] = []
 
@@ -91,7 +93,11 @@ def prepare_localization_features(
             "Call add_localization_special_tokens() first."
         )
 
-    for sample in samples:
+    iterator = samples
+    if show_progress:
+        iterator = tqdm(samples, desc="tokenizing features", unit="samples")
+
+    for sample in iterator:
         text = build_localization_text(sample, line_token=line_token)
         encoded = tokenizer(
             text,
