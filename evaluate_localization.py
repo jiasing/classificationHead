@@ -31,7 +31,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--threshold-sweep",
+        default=None,
+        help="Comma-separated thresholds, e.g. 0.05,0.1,0.2,0.3,0.4,0.5",
+    )
     return parser.parse_args()
+
+
+def parse_threshold_sweep(raw: str | None, default_threshold: float) -> list[float]:
+    if raw is None:
+        return [default_threshold]
+    thresholds: list[float] = []
+    for part in raw.split(","):
+        value = float(part.strip())
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("threshold values must be in [0, 1]")
+        thresholds.append(value)
+    if not thresholds:
+        raise ValueError("threshold_sweep must contain at least one threshold")
+    return thresholds
 
 
 def main() -> None:
@@ -88,7 +108,7 @@ def main() -> None:
     ).to(args.device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    metrics = evaluate_localization_model(model, dataloader, args.device)
+    thresholds = parse_threshold_sweep(args.threshold_sweep, args.threshold)
 
     print(f"checkpoint_path={checkpoint_path}")
     print(f"dataset_path={args.dataset_path}")
@@ -97,11 +117,24 @@ def main() -> None:
     print(f"backbone_name={backbone_name}")
     print(f"max_length={max_length}")
     print(f"batch_size={args.batch_size}")
-    print(f"loss={metrics['loss']:.6f}")
-    print(f"accuracy={metrics['accuracy']:.6f}")
-    print(f"precision={metrics['precision']:.6f}")
-    print(f"recall={metrics['recall']:.6f}")
-    print(f"f1={metrics['f1']:.6f}")
+
+    best_threshold = None
+    best_f1 = float("-inf")
+    for threshold in thresholds:
+        metrics = evaluate_localization_model(model, dataloader, args.device, threshold=threshold)
+        print(f"threshold={threshold:.4f}")
+        print(f"loss={metrics['loss']:.6f}")
+        print(f"accuracy={metrics['accuracy']:.6f}")
+        print(f"precision={metrics['precision']:.6f}")
+        print(f"recall={metrics['recall']:.6f}")
+        print(f"f1={metrics['f1']:.6f}")
+        if metrics["f1"] > best_f1:
+            best_f1 = metrics["f1"]
+            best_threshold = threshold
+
+    if len(thresholds) > 1:
+        print(f"best_threshold={best_threshold:.4f}")
+        print(f"best_f1={best_f1:.6f}")
 
 
 if __name__ == "__main__":

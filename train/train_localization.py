@@ -216,6 +216,7 @@ def evaluate_localization_model(
     model: torch.nn.Module,
     dataloader: DataLoader | None,
     device: str,
+    threshold: float = 0.5,
 ) -> dict[str, float]:
     if dataloader is None:
         return {"loss": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0}
@@ -238,7 +239,7 @@ def evaluate_localization_model(
             total_loss += outputs["loss"].item()
             batch_count += 1
             valid_mask = batch["line_mask"] > 0
-            batch_predictions = (torch.sigmoid(outputs["line_logits"].detach().cpu()) >= 0.5).to(torch.long)
+            batch_predictions = (torch.sigmoid(outputs["line_logits"].detach().cpu()) >= threshold).to(torch.long)
             batch_gold = batch["line_labels"].detach().cpu().to(torch.long)
             predictions_list.append(batch_predictions[valid_mask])
             gold_list.append(batch_gold[valid_mask])
