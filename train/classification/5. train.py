@@ -18,7 +18,7 @@ BATCH_SIZE       = 16       # reduce to 8 if you get out-of-memory errors
 EPOCHS           = 10
 LEARNING_RATE    = 2e-5
 DROPOUT          = 0.1
-DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 SAVE_DIR         = "models/classifier"
 
 # Loss weight for each head — 1.0 means equal contribution
@@ -309,6 +309,7 @@ def train():
             print("\n  Category head report:")
             print(classification_report(
                 cat_labels, cat_preds,
+                labels=list(range(NUM_CATEGORIES)),
                 target_names=cat_names,
                 zero_division=0
             ))
@@ -316,6 +317,7 @@ def train():
             print("  Error type head report:")
             print(classification_report(
                 err_labels, err_preds,
+                labels=list(range(NUM_ERROR_TYPES)),
                 target_names=err_names,
                 zero_division=0
             ))

@@ -229,3 +229,4 @@ data/classification_processed/juliet_cleaned.json
 data/classification_processed/juliet_labelled.csv
 data/classification_processed/juliet_labelled.json
 data/classification_processed/label_maps.json
+.claude/worktrees/interesting-burnell/
