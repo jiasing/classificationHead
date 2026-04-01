@@ -28,7 +28,7 @@ ERROR_TYPE_LOSS_WEIGHT = 1.0
 
 # ── Load label maps ───────────────────────────────────────────────────────────
 
-with open("data/processed/label_maps.json") as f:
+with open("data/classification_processed/label_maps.json") as f:
     label_maps = json.load(f)
 
 NUM_CATEGORIES  = len(label_maps["category_to_id"])    # 5: Clean + 4 categories
