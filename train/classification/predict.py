@@ -1,15 +1,18 @@
 # src/predict.py
 
+import os
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import torch
 import json
 from transformers import AutoTokenizer
-from src.train import CodeT5Classifier   # reuse the class definition
+from train.classification.train import CodeT5Classifier   # reuse the class definition
 
 SAVE_DIR   = "models/classifier"
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_LENGTH = 512
 
-with open("data/processed/label_maps.json") as f:
+with open("data/classification_processed/label_maps.json") as f:
     label_maps = json.load(f)
 
 NUM_CATEGORIES  = len(label_maps["category_to_id"])
@@ -19,7 +22,8 @@ NUM_ERROR_TYPES = len(label_maps["error_type_to_id"])
 def load_model():
     tokenizer = AutoTokenizer.from_pretrained(SAVE_DIR)
     model = CodeT5Classifier("Salesforce/codet5p-220m", NUM_CATEGORIES, NUM_ERROR_TYPES)
-    model.load_state_dict(torch.load(f"{SAVE_DIR}/best_model.pt", map_location=DEVICE))
+    checkpoint = torch.load(f"{SAVE_DIR}/best_model.pt", map_location=DEVICE, weights_only=False)
+    model.load_state_dict(checkpoint["model_state"])
     model.to(DEVICE)
     model.eval()
     return model, tokenizer

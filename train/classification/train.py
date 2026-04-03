@@ -5,8 +5,8 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from transformers import AutoTokenizer, AutoModel
-from sklearn.metrics import classification_report
+from transformers import AutoTokenizer, T5EncoderModel
+from sklearn.metrics import classification_report, f1_score
 import pandas as pd
 import numpy as np
 
@@ -49,15 +49,27 @@ class JulietDataset(Dataset):
       - error_type_label           → target for the error type head
     """
 
-    def __init__(self, filepath, tokenizer):
-        self.df = pd.read_json(filepath, lines=True).reset_index(drop=True)
-        self.tokenizer = tokenizer
+    def __init__(self, filepath, tokenizer, max_per_class=None):
+        df = pd.read_json(filepath, lines=True).reset_index(drop=True)
 
         # Validate required columns exist
         required = {'function_code', 'category_id', 'error_type_id'}
-        missing = required - set(self.df.columns)
+        missing = required - set(df.columns)
         if missing:
             raise ValueError(f"Dataset missing columns: {missing}")
+
+        # Undersample majority classes so no class exceeds max_per_class samples
+        if max_per_class is not None:
+            df = (
+                df.groupby("category_id", group_keys=False)
+                  .apply(lambda g: g.sample(min(len(g), max_per_class), random_state=42))
+                  .reset_index(drop=True)
+            )
+            print(f"  After undersampling (max {max_per_class}/class): {len(df)} samples")
+            print(f"  Category distribution:\n{df['category_id'].value_counts().sort_index()}\n")
+
+        self.df = df
+        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.df)
@@ -117,7 +129,7 @@ class CodeT5Classifier(nn.Module):
 
         # The encoder — this is the pretrained CodeT5 backbone
         # AutoModel loads just the encoder stack, no decoder
-        self.encoder = AutoModel.from_pretrained(checkpoint)
+        self.encoder = T5EncoderModel.from_pretrained(checkpoint)
         hidden_size = self.encoder.config.hidden_size
         # hidden_size is 768 for codet5p-220m
 
@@ -158,7 +170,7 @@ class CodeT5Classifier(nn.Module):
 
 # ── Evaluation helper ─────────────────────────────────────────────────────────
 
-def evaluate(model, loader, loss_fn):
+def evaluate(model, loader, cat_loss_fn, err_loss_fn):
     """
     Runs a full pass over a dataloader without updating weights.
     Returns average loss, accuracy for each head, and full predictions
@@ -181,8 +193,8 @@ def evaluate(model, loader, loss_fn):
 
             cat_logits, err_logits = model(input_ids, attention_mask)
 
-            cat_loss = loss_fn(cat_logits, cat_labels)
-            err_loss = loss_fn(err_logits, err_labels)
+            cat_loss = cat_loss_fn(cat_logits, cat_labels)
+            err_loss = err_loss_fn(err_logits, err_labels)
             loss = CATEGORY_LOSS_WEIGHT * cat_loss + ERROR_TYPE_LOSS_WEIGHT * err_loss
             total_loss += loss.item()
 
@@ -217,7 +229,8 @@ def train():
     model.to(DEVICE)
 
     # Datasets and loaders
-    train_dataset = JulietDataset("data/splits/train.json", tokenizer)
+    # Cap Clean (majority class) to 2x the next largest class to reduce bias
+    train_dataset = JulietDataset("data/splits/train.json", tokenizer, max_per_class=144000)
     val_dataset   = JulietDataset("data/splits/val.json",   tokenizer)
 
     train_loader = DataLoader(
@@ -251,8 +264,19 @@ def train():
         pct_start=0.1
     )
 
-    loss_fn = nn.CrossEntropyLoss()
-    best_val_loss = float('inf')
+    # Compute class weights (inverse frequency) to further penalise minority classes
+    cat_counts = torch.zeros(NUM_CATEGORIES)
+    err_counts = torch.zeros(NUM_ERROR_TYPES)
+    for cid, count in train_dataset.df["category_id"].value_counts().items():
+        cat_counts[int(cid)] = count
+    for eid, count in train_dataset.df["error_type_id"].value_counts().items():
+        err_counts[int(eid)] = count
+    cat_weights = (cat_counts.sum() / (NUM_CATEGORIES  * cat_counts.clamp(min=1))).to(DEVICE)
+    err_weights = (err_counts.sum() / (NUM_ERROR_TYPES * err_counts.clamp(min=1))).to(DEVICE)
+
+    cat_loss_fn = nn.CrossEntropyLoss(weight=cat_weights)
+    err_loss_fn = nn.CrossEntropyLoss(weight=err_weights)
+    best_cat_macro_f1 = 0.0
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     for epoch in range(EPOCHS):
@@ -271,8 +295,8 @@ def train():
             cat_logits, err_logits = model(input_ids, attention_mask)
 
             # Combined loss — weighted sum of both head losses
-            cat_loss = loss_fn(cat_logits, cat_labels)
-            err_loss = loss_fn(err_logits, err_labels)
+            cat_loss = cat_loss_fn(cat_logits, cat_labels)
+            err_loss = err_loss_fn(err_logits, err_labels)
             loss = CATEGORY_LOSS_WEIGHT * cat_loss + ERROR_TYPE_LOSS_WEIGHT * err_loss
 
             loss.backward()
@@ -293,13 +317,16 @@ def train():
         # ── Validation phase ──────────────────────────────────────────────────
         val_loss, cat_acc, err_acc, \
         cat_preds, cat_labels, \
-        err_preds, err_labels = evaluate(model, val_loader, loss_fn)
+        err_preds, err_labels = evaluate(model, val_loader, cat_loss_fn, err_loss_fn)
+
+        cat_macro_f1 = f1_score(cat_labels, cat_preds, average="macro", zero_division=0)
 
         print(f"\nEpoch {epoch+1}/{EPOCHS} summary")
         print(f"  train loss : {avg_train_loss:.4f}")
         print(f"  val loss   : {val_loss:.4f}")
         print(f"  category accuracy  : {cat_acc:.1f}%")
         print(f"  error type accuracy: {err_acc:.1f}%")
+        print(f"  category macro F1  : {cat_macro_f1:.4f}")
 
         # Per-class breakdown every 3 epochs so you can spot weak classes
         if (epoch + 1) % 3 == 0:
@@ -322,9 +349,9 @@ def train():
                 zero_division=0
             ))
 
-        # Save best model checkpoint
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Save best model checkpoint based on category macro F1
+        if cat_macro_f1 > best_cat_macro_f1:
+            best_cat_macro_f1 = cat_macro_f1
             torch.save({
                 "epoch":           epoch + 1,
                 "model_state":     model.state_dict(),
@@ -332,14 +359,15 @@ def train():
                 "val_loss":        val_loss,
                 "cat_acc":         cat_acc,
                 "err_acc":         err_acc,
+                "cat_macro_f1":    cat_macro_f1,
             }, f"{SAVE_DIR}/best_model.pt")
             tokenizer.save_pretrained(SAVE_DIR)
-            print(f"  → checkpoint saved (val loss: {val_loss:.4f})")
+            print(f"  → checkpoint saved (category macro F1: {cat_macro_f1:.4f})")
 
         print()
 
     print("Training complete.")
-    print(f"Best val loss: {best_val_loss:.4f}")
+    print(f"Best category macro F1: {best_cat_macro_f1:.4f}")
     print(f"Model saved to: {SAVE_DIR}/")
 
 
