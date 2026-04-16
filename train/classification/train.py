@@ -31,8 +31,8 @@ ERROR_TYPE_LOSS_WEIGHT = 1.0
 with open("data/classification_processed/label_maps.json") as f:
     label_maps = json.load(f)
 
-NUM_CATEGORIES  = len(label_maps["category_to_id"])    # 5: Clean + 4 categories
-NUM_ERROR_TYPES = len(label_maps["error_type_to_id"])  # 13: Clean + 12 error types
+NUM_CATEGORIES  = len(label_maps["category_to_id"])    # 4 categories
+NUM_ERROR_TYPES = len(label_maps["error_type_to_id"])  # 9 error types
 
 ID_TO_CATEGORY   = label_maps["id_to_category"]
 ID_TO_ERROR_TYPE = label_maps["id_to_error_type"]
@@ -60,11 +60,10 @@ class JulietDataset(Dataset):
 
         # Undersample majority classes so no class exceeds max_per_class samples
         if max_per_class is not None:
-            df = (
-                df.groupby("category_id", group_keys=False)
-                  .apply(lambda g: g.sample(min(len(g), max_per_class), random_state=42))
-                  .reset_index(drop=True)
-            )
+            df = pd.concat([
+                g.sample(min(len(g), max_per_class), random_state=42)
+                for _, g in df.groupby("category_id")
+            ]).reset_index(drop=True)
             print(f"  After undersampling (max {max_per_class}/class): {len(df)} samples")
             print(f"  Category distribution:\n{df['category_id'].value_counts().sort_index()}\n")
 
@@ -117,8 +116,8 @@ class ClassificationHead(nn.Module):
 class CodeT5Classifier(nn.Module):
     """
     CodeT5 encoder with two independent classification heads:
-      - category_head:   predicts one of 5 categories (Clean + 4)
-      - error_type_head: predicts one of 13 error types (Clean + 12)
+      - category_head:   predicts one of 4 categories
+      - error_type_head: predicts one of 9 error types
 
     Both heads read from the same pooled encoder representation,
     so the encoder is trained jointly to serve both tasks at once.
@@ -162,8 +161,8 @@ class CodeT5Classifier(nn.Module):
         # ── Classify ─────────────────────────────────────────────────────────
         # Both heads receive the same pooled vector independently.
         # Neither head can see the other's output — they are fully separate.
-        category_logits   = self.category_head(pooled)    # [batch, 5]
-        error_type_logits = self.error_type_head(pooled)  # [batch, 13]
+        category_logits   = self.category_head(pooled)    # [batch, 4]
+        error_type_logits = self.error_type_head(pooled)  # [batch, 9]
 
         return category_logits, error_type_logits
 
@@ -229,8 +228,7 @@ def train():
     model.to(DEVICE)
 
     # Datasets and loaders
-    # Cap Clean (majority class) to 2x the next largest class to reduce bias
-    train_dataset = JulietDataset("data/splits/train.json", tokenizer, max_per_class=144000)
+    train_dataset = JulietDataset("data/splits/train.json", tokenizer)
     val_dataset   = JulietDataset("data/splits/val.json",   tokenizer)
 
     train_loader = DataLoader(

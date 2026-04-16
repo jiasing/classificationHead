@@ -144,13 +144,13 @@ CWE_MAP = {
 
 # ── Build integer encoders for both label levels ──────────────────────────────
 # Collect all unique values in order
-all_categories  = ["Clean"] + sorted(set(v[0] for v in CWE_MAP.values()))
-all_error_types = ["Clean"] + sorted(set(v[1] for v in CWE_MAP.values()))
+all_categories  = sorted(set(v[0] for v in CWE_MAP.values()))
+all_error_types = sorted(set(v[1] for v in CWE_MAP.values()))
 
-# Create the categories labelling. ie, cat_id = 0 means "Clean", cat_id = 1 means "Logic Organization".
+# Create the categories labelling. ie, cat_id = 0 means "Logic Organization", etc.
 # Found in label_maps.json
 CATEGORY_TO_ID  = {cat:  i for i, cat  in enumerate(all_categories)}
-# Create the error labelling. ie, error_id = 0 means "Clean", error_id = 5 means "Incorrect Variable Usage". 
+# Create the error labelling. ie, error_id = 0 means "Control Expression Error", etc.
 # Found in label_maps.json
 ERROR_TYPE_TO_ID = {et:  i for i, et   in enumerate(all_error_types)}
 
@@ -171,36 +171,33 @@ print(f"Error types ({len(ERROR_TYPE_TO_ID)}): {list(ERROR_TYPE_TO_ID.keys())}")
 def apply_labels(df):
     """
     Takes juliet_cleaned.json and adds category_id and error_type_id columns.
-    label=0 (clean) functions get the 'Clean' class for both levels.
-    label=1 (vulnerable) functions get their CWE-derived labels.
+    Clean (label=0) rows are dropped — we only classify vulnerable code.
+    label=1 rows with CWEs not in our mapping are also dropped.
     """
-    category_ids  = []
+    # Drop clean (safe) functions — only classify vulnerable code
+    df = df[df['label'] == 1].reset_index(drop=True)
+
+    category_ids   = []
     error_type_ids = []
+    keep           = []
     skipped = 0
 
-    for _, row in df.iterrows():
-        if row['label'] == 0:
-            # Safe/clean function — no vulnerability category
-            category_ids.append(CATEGORY_TO_ID["Clean"])
-            error_type_ids.append(ERROR_TYPE_TO_ID["Clean"])
+    for idx, row in df.iterrows():
+        cwe = int(row['cwe']) if pd.notna(row['cwe']) else None
+        if cwe and cwe in CWE_MAP:
+            cat, err = CWE_MAP[cwe]
+            category_ids.append(CATEGORY_TO_ID[cat])
+            error_type_ids.append(ERROR_TYPE_TO_ID[err])
+            keep.append(idx)
         else:
-            cwe = int(row['cwe']) if pd.notna(row['cwe']) else None
-            if cwe and cwe in CWE_MAP:
-                cat, err = CWE_MAP[cwe]
-                category_ids.append(CATEGORY_TO_ID[cat])
-                error_type_ids.append(ERROR_TYPE_TO_ID[err])
-            else:
-                # CWE not in our mapping table — mark as Clean and flag
-                category_ids.append(CATEGORY_TO_ID["Clean"])
-                error_type_ids.append(ERROR_TYPE_TO_ID["Clean"])
-                skipped += 1
+            skipped += 1
 
-    df = df.copy()
+    df = df.loc[keep].copy()
     df['category_id']   = category_ids
     df['error_type_id'] = error_type_ids
 
     if skipped:
-        print(f"Warning: {skipped} rows had CWEs not in our mapping — labelled as Clean")
+        print(f"Warning: {skipped} rows had CWEs not in our mapping — dropped")
 
     return df
 
